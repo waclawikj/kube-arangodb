@@ -152,26 +152,6 @@ $ kubectl get nodes
   ip-172-31-45-199.us-west-2.compute.internal   Ready    <none>   1d    v1.10.3
 ```
 
-### Create a storage class for persistent data
-
-* Edit a new file `gp2-storage-class.yaml`
-```
-kind: StorageClass
-apiVersion: storage.k8s.io/v1
-metadata:
-    name: gp2
-provisioner: kubernetes.io/aws-ebs
-parameters:
-    type: gp2
-reclaimPolicy: Retain
-mountOptions:
-    - debug
-```
-* Apply the storage class 
-```
-$ kubectl apply -f gp2-storage-class.yaml
-```
-
 ### Setup `helm`
 * Create service account for `tiller`
 ```
@@ -190,6 +170,93 @@ $ helm init --service-account tiller
     $HELM_HOME has been configured at ~/.helm.
     ...
     Happy Helming!
+```
+
+## Deploy ArangoDB operator charts
+
+- Deploy ArangoDB custom resource definition chart
+
+```
+helm install https://github.com/arangodb/kube-arangodb/releases/download/0.3.7/kube-arangodb-crd.tgz
+```
+```
+  NAME:   hoping-gorilla
+  LAST DEPLOYED: Mon Jan 14 06:10:27 2019
+  NAMESPACE: default
+  STATUS: DEPLOYED
+
+  RESOURCES:
+  ==> v1beta1/CustomResourceDefinition
+  NAME                                                            AGE
+  arangodeployments.database.arangodb.com                         0s
+  arangodeploymentreplications.replication.database.arangodb.com  0s
+
+
+  NOTES:
+
+  kube-arangodb-crd has been deployed successfully!
+
+  Your release is named 'hoping-gorilla'.
+
+  You can now continue install kube-arangodb chart.
+```
+- Deploy ArangoDB operator chart
+
+```
+helm install https://github.com/arangodb/kube-arangodb/releases/download/0.3.7/kube-arangodb.tgz
+```
+```
+  NAME:   illocutionary-whippet
+  LAST DEPLOYED: Mon Jan 14 06:11:58 2019
+  NAMESPACE: default
+  STATUS: DEPLOYED
+
+  RESOURCES:
+  ==> v1beta1/ClusterRole
+  NAME                                                   AGE
+  illocutionary-whippet-deployment-replications          0s
+  illocutionary-whippet-deployment-replication-operator  0s
+  illocutionary-whippet-deployments                      0s
+  illocutionary-whippet-deployment-operator              0s
+
+  ==> v1beta1/ClusterRoleBinding
+  NAME                                                           AGE
+  illocutionary-whippet-deployment-replication-operator-default  0s
+  illocutionary-whippet-deployment-operator-default              0s
+
+  ==> v1beta1/RoleBinding
+  NAME                                           AGE
+  illocutionary-whippet-deployment-replications  0s
+  illocutionary-whippet-deployments              0s
+
+  ==> v1/Service
+  NAME                                    TYPE       CLUSTER-IP     EXTERNAL-IP  PORT(S)    AGE
+  arango-deployment-replication-operator  ClusterIP  10.107.2.133   <none>       8528/TCP  0s
+  arango-deployment-operator              ClusterIP  10.104.189.81  <none>       8528/TCP  0s
+
+  ==> v1beta1/Deployment
+  NAME                                    DESIRED  CURRENT  UP-TO-DATE  AVAILABLE  AGE
+  arango-deployment-replication-operator  2        2        2           0          0s
+  arango-deployment-operator              2        2        2           0          0s
+
+  ==> v1/Pod(related)
+  NAME                                                     READY  STATUS             RESTARTS  AGE
+  arango-deployment-replication-operator-5f679fbfd8-nk8kz  0/1    Pending            0         0s
+  arango-deployment-replication-operator-5f679fbfd8-pbxdl  0/1    ContainerCreating  0         0s
+  arango-deployment-operator-65f969fc84-gjgl9              0/1    Pending            0         0s
+  arango-deployment-operator-65f969fc84-wg4nf              0/1    ContainerCreating  0         0s
+
+
+NOTES:
+
+kube-arangodb has been deployed successfully!
+
+Your release is named 'illocutionary-whippet'.
+
+You can now deploy ArangoDeployment & ArangoDeploymentReplication resources.
+
+See https://docs.arangodb.com/devel/Manual/Tutorials/Kubernetes/
+for how to get started.
 ```
 
 ### Deploy ArangoDB cluster
