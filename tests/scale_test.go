@@ -24,258 +24,144 @@ package tests
 
 import (
 	"context"
+	"github.com/arangodb/kube-arangodb/tests/helper"
+	"github.com/stretchr/testify/assert"
 	"testing"
 
-	"github.com/dchest/uniuri"
-
-	driver "github.com/arangodb/go-driver"
 	api "github.com/arangodb/kube-arangodb/pkg/apis/deployment/v1alpha"
-	"github.com/arangodb/kube-arangodb/pkg/client"
 	"github.com/arangodb/kube-arangodb/pkg/util"
 )
 
 // TestScaleCluster tests scaling up/down the number of DBServers & coordinators
 // of a cluster.
-func TestScaleClusterNonTLS(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func Test_New_ScaleNonTLS(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-scale-non-tls" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.TLS = api.TLSSpec{CASecretName: util.NewString("None")}
-	depl.Spec.SetDefaults(depl.GetName()) // this must be last
-
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for cluster to be completely ready
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, apiObject.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running in expected health in time: %v", err)
-	}
-
-	// Add 2 DBServers, 1 coordinator
-	updated, err := updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(5)
-		spec.Coordinators.Count = util.NewInt(4)
+	deploymentWrapper := helper.NewArangoDeploymentWrapper("test-scale-non-tls", func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
+		deployment.Spec.TLS = api.TLSSpec{CASecretName: util.NewString("None")}
 	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
 
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-up, in expected health in time: %v", err)
-	}
+	deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+		helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Remove 3 DBServers, 2 coordinator
-	updated, err = updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(3)
-		spec.Coordinators.Count = util.NewInt(2)
+		helper.WaitUntilKubernetesSecretIsPresent(t, deployment.Spec.Authentication.GetJWTSecretName())
+
+		ctx := context.Background()
+		client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+		helper.WaitUntilArangoClientReady(t, client)
+
+		t.Run("ScaleUP", func(t *testing.T) {
+
+			helper.UpdateArangoDeployment(t, deployment.Name, func(deployment *api.ArangoDeployment) {
+				deployment.Spec.DBServers.Count = util.NewInt(5)
+				deployment.Spec.Coordinators.Count = util.NewInt(4)
+			})
+
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
+
+			ctx := context.Background()
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+			helper.WaitUntilArangoClientReady(t, client)
+
+			newDeployment := helper.RefreshDeployment(t, deployment)
+
+			assert.Len(t, newDeployment.Status.Members.DBServers, 5)
+			assert.Len(t, newDeployment.Status.Members.Coordinators, 4)
+		})
+
+		t.Run("ScaleDown", func(t *testing.T) {
+
+			helper.UpdateArangoDeployment(t, deployment.Name, func(deployment *api.ArangoDeployment) {
+				deployment.Spec.DBServers.Count = util.NewInt(3)
+				deployment.Spec.Coordinators.Count = util.NewInt(2)
+			})
+
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
+
+			ctx := context.Background()
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+			helper.WaitUntilArangoClientReady(t, client)
+
+			newDeployment := helper.RefreshDeployment(t, deployment)
+
+			assert.Len(t, newDeployment.Status.Members.DBServers, 3)
+			assert.Len(t, newDeployment.Status.Members.Coordinators, 2)
+		})
 	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
-
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-down, in expected health in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
 }
 
-func TestScaleCluster(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func Test_New_ScaleWithSync(t *testing.T) {
+	helper.MarkIntegrationTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-scale" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.TLS = api.TLSSpec{}         // should auto-generate cert
-	depl.Spec.SetDefaults(depl.GetName()) // this must be last
-
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for cluster to be completely ready
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, apiObject.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running in expected health in time: %v", err)
-	}
-
-	// Add 2 DBServers, 1 coordinator
-	updated, err := updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(5)
-		spec.Coordinators.Count = util.NewInt(4)
+	deploymentWrapper := helper.NewArangoDeploymentWrapper("test-scale-sync", func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
+		deployment.Spec.Sync.Enabled = util.NewBool(true)
 	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
 
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-up, in expected health in time: %v", err)
-	}
+	deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+		helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Remove 3 DBServers, 2 coordinator
-	updated, err = updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(3)
-		spec.Coordinators.Count = util.NewInt(2)
+		helper.WaitUntilKubernetesSecretIsPresent(t, deployment.Spec.Authentication.GetJWTSecretName())
+
+		ctx := context.Background()
+		client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+		helper.WaitUntilArangoClientReady(t, client)
+
+		helper.SkipIfNotEnterprise(t, client, ctx)
+
+		t.Run("ScaleUP", func(t *testing.T) {
+
+			helper.UpdateArangoDeployment(t, deployment.Name, func(deployment *api.ArangoDeployment) {
+				deployment.Spec.DBServers.Count = util.NewInt(4)
+				deployment.Spec.SyncWorkers.Count = util.NewInt(4)
+				deployment.Spec.SyncMasters.Count = util.NewInt(5)
+			})
+
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
+
+			ctx := context.Background()
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+			helper.WaitUntilArangoClientReady(t, client)
+
+			newDeployment := helper.RefreshDeployment(t, deployment)
+
+			assert.Len(t, newDeployment.Status.Members.DBServers, 4)
+			assert.Len(t, newDeployment.Status.Members.SyncWorkers, 4)
+			assert.Len(t, newDeployment.Status.Members.SyncMasters, 5)
+
+			syncClient := mustNewArangoSyncClient(ctx, helper.KubernetesClient(t), deployment, t)
+			helper.WaitUntilArangoSyncClientReady(t, syncClient, 5, 4)
+		})
+
+		t.Run("ScaleDown", func(t *testing.T) {
+
+			helper.UpdateArangoDeployment(t, deployment.Name, func(deployment *api.ArangoDeployment) {
+				deployment.Spec.DBServers.Count = util.NewInt(2)
+				deployment.Spec.SyncWorkers.Count = util.NewInt(2)
+				deployment.Spec.SyncMasters.Count = util.NewInt(3)
+			})
+
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
+
+			ctx := context.Background()
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
+
+			helper.WaitUntilArangoClientReady(t, client)
+
+			newDeployment := helper.RefreshDeployment(t, deployment)
+
+			assert.Len(t, newDeployment.Status.Members.DBServers, 2)
+			assert.Len(t, newDeployment.Status.Members.SyncWorkers, 2)
+			assert.Len(t, newDeployment.Status.Members.SyncMasters, 3)
+
+			syncClient := mustNewArangoSyncClient(ctx, helper.KubernetesClient(t), deployment, t)
+			helper.WaitUntilArangoSyncClientReady(t, syncClient, 3, 2)
+		})
 	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
-
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-down, in expected health in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-}
-
-// TestScaleClusterWithSync tests scaling a cluster deployment with sync enabled.
-func TestScaleClusterWithSync(t *testing.T) {
-	longOrSkip(t)
-	img := getEnterpriseImageOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-
-	// Prepare deployment config
-	depl := newDeployment("test-scale-sync" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.Image = util.NewString(img)
-	depl.Spec.Sync.Enabled = util.NewBool(true)
-	depl.Spec.SetDefaults(depl.GetName()) // this must be last
-
-	// Create deployment
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	// Prepare cleanup
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	apiObject, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady())
-	if err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Create a syncmaster client
-	syncClient := mustNewArangoSyncClient(ctx, kubecli, apiObject, t)
-
-	// Wait for cluster to be completely ready
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, apiObject.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running in expected health in time: %v", err)
-	}
-
-	// Wait for syncmasters to be available
-	if err := waitUntilSyncVersionUp(syncClient, nil); err != nil {
-		t.Fatalf("SyncMasters not running returning version in time: %v", err)
-	}
-
-	// Add 1 DBServer, 2 SyncMasters, 1 syncworker
-	updated, err := updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(4)
-		spec.SyncMasters.Count = util.NewInt(5)
-		spec.SyncWorkers.Count = util.NewInt(4)
-	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
-
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-up, in expected health in time: %v", err)
-	}
-	// Check number of syncmasters
-	if err := waitUntilSyncMasterCountReached(syncClient, updated.Spec.SyncMasters.GetCount()); err != nil {
-		t.Fatalf("Unexpected #syncmasters, after scale-up: %v", err)
-	}
-	// Check number of syncworkers
-	if err := waitUntilSyncWorkerCountReached(syncClient, updated.Spec.SyncWorkers.GetCount()); err != nil {
-		t.Fatalf("Unexpected #syncworkers, after scale-up: %v", err)
-	}
-
-	// Remove 1 DBServer, 2 SyncMasters & 1 SyncWorker
-	updated, err = updateDeployment(c, depl.GetName(), ns, func(spec *api.DeploymentSpec) {
-		spec.DBServers.Count = util.NewInt(3)
-		spec.SyncMasters.Count = util.NewInt(3)
-		spec.SyncWorkers.Count = util.NewInt(3)
-	})
-	if err != nil {
-		t.Fatalf("Failed to update deployment: %v", err)
-	}
-
-	// Wait for cluster to reach new size
-	if err := waitUntilClusterHealth(client, func(h driver.ClusterHealth) error {
-		return clusterHealthEqualsSpec(h, updated.Spec)
-	}); err != nil {
-		t.Fatalf("Cluster not running, after scale-down, in expected health in time: %v", err)
-	}
-	// Check number of syncmasters
-	if err := waitUntilSyncMasterCountReached(syncClient, updated.Spec.SyncMasters.GetCount()); err != nil {
-		t.Fatalf("Unexpected #syncmasters, after scale-up: %v", err)
-	}
-	// Check number of syncworkers
-	if err := waitUntilSyncWorkerCountReached(syncClient, updated.Spec.SyncWorkers.GetCount()); err != nil {
-		t.Fatalf("Unexpected #syncworkers, after scale-up: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
 }

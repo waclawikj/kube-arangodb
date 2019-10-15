@@ -17,163 +17,107 @@
 //
 // Copyright holder is ArangoDB GmbH, Cologne, Germany
 //
-// Author Jan Christoph Uhde <jan@uhdejc.com>
+// Author Adam Janikowski
 //
+
 package tests
 
 import (
 	"context"
 	"fmt"
+	"github.com/arangodb/kube-arangodb/pkg/util/arangod"
+	"github.com/arangodb/kube-arangodb/tests/helper"
 	"testing"
 
-	"github.com/dchest/uniuri"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	driver "github.com/arangodb/go-driver"
+	"github.com/arangodb/go-driver"
 
 	api "github.com/arangodb/kube-arangodb/pkg/apis/deployment/v1alpha"
-	kubeArangoClient "github.com/arangodb/kube-arangodb/pkg/client"
 )
 
-// test deployment single server mmfiles
-func TestDeploymentSingleMMFiles(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeSingle, api.StorageEngineMMFiles)
+
+func Test_New_Deployment(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
+
+	iterateOverStorageEngines(t, func(t *testing.T, storageEngine api.StorageEngine) {
+		iterateOverModes(t, func(t *testing.T, mode api.DeploymentMode) {
+			deploymentSubTest(t, mode, storageEngine)
+		})
+	})
 }
 
-// test deployment single server rocksdb
-func TestDeploymentSingleRocksDB(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeSingle, api.StorageEngineRocksDB)
-}
+func deploymentSubTest(t *testing.T, mode api.DeploymentMode, engine api.StorageEngine) {
+	helper.MarkSmokeTest(t, true)
+	deploymentWrapper := helper.NewArangoDeploymentWrapper(fmt.Sprintf("test-deployment-%s-%s", mode, engine), func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(mode)
+		deployment.Spec.StorageEngine = api.NewStorageEngine(engine)
+	})
 
-// test deployment active-failover server mmfiles
-func TestDeploymentActiveFailoverMMFiles(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeActiveFailover, api.StorageEngineMMFiles)
-}
+	deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+		helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-// test deployment active-failover server rocksdb
-func TestDeploymentActiveFailoverRocksDB(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeActiveFailover, api.StorageEngineRocksDB)
-}
+		helper.WaitUntilKubernetesSecretIsPresent(t, deployment.Spec.Authentication.GetJWTSecretName())
 
-// test deployment cluster mmfiles
-func TestDeploymentClusterMMFiles(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeCluster, api.StorageEngineMMFiles)
-}
+		ctx := context.Background()
+		client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
 
-// test deployment cluster rocksdb
-func TestDeploymentClusterRocksDB(t *testing.T) {
-	deploymentSubTest(t, api.DeploymentModeCluster, api.StorageEngineRocksDB)
-}
-
-func deploymentSubTest(t *testing.T, mode api.DeploymentMode, engine api.StorageEngine) error {
-	// check environment
-	longOrSkip(t)
-
-	ns := getNamespace(t)
-	kubecli := mustNewKubeClient(t)
-	c := kubeArangoClient.MustNewInCluster()
-
-	// Prepare deployment config
-	depl := newDeployment("test-deployment-" + string(mode) + "-" + string(engine) + "-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(mode)
-	depl.Spec.StorageEngine = api.NewStorageEngine(engine)
-	depl.Spec.TLS = api.TLSSpec{}         // should auto-generate cert
-	depl.Spec.SetDefaults(depl.GetName()) // this must be last
-
-	// Create deployment
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	require.NoError(t, err, fmt.Sprintf("Create deployment failed: %v", err))
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	deployment, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady())
-	require.NoError(t, err, fmt.Sprintf("Deployment not running in time: %v", err))
-
-	// Create a database client
-	ctx := context.Background()
-	DBClient := mustNewArangodDatabaseClient(ctx, kubecli, deployment, t, nil)
-	require.NoError(t, waitUntilArangoDeploymentHealthy(deployment, DBClient, kubecli, ""), fmt.Sprintf("Deployment not healthy in time: %v", err))
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-
-	return nil
+		helper.WaitUntilArangoClientReady(t, client)
+	})
 }
 
 // test a setup containing multiple deployments
-func TestMultiDeployment(t *testing.T) {
-	longOrSkip(t)
+func Test_New_DeploymentMulti(t *testing.T) {
+	helper.MarkSmokeTest(t, false)
 
-	ns := getNamespace(t)
-	kubecli := mustNewKubeClient(t)
-	c := kubeArangoClient.MustNewInCluster()
+	deploymentWrapper1 := helper.NewArangoDeploymentWrapper("test-multidepl-1", func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
+		deployment.Spec.StorageEngine = api.NewStorageEngine(api.StorageEngineRocksDB)
+	})
 
-	// Prepare deployment configurations
-	depl1 := newDeployment("test-multidep-1-" + uniuri.NewLen(4))
-	depl1.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl1.Spec.StorageEngine = api.NewStorageEngine(api.StorageEngineRocksDB)
-	depl1.Spec.TLS = api.TLSSpec{}          // should auto-generate cert
-	depl1.Spec.SetDefaults(depl1.GetName()) // this must be last
+	deploymentWrapper2 := helper.NewArangoDeploymentWrapper("test-multidepl-2", func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
+		deployment.Spec.StorageEngine = api.NewStorageEngine(api.StorageEngineMMFiles)
+	})
 
-	depl2 := newDeployment("test-multidep-2-" + uniuri.NewLen(4))
-	depl2.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
-	depl2.Spec.StorageEngine = api.NewStorageEngine(api.StorageEngineMMFiles)
-	depl2.Spec.TLS = api.TLSSpec{}          // should auto-generate cert
-	depl2.Spec.SetDefaults(depl2.GetName()) // this must be last
+	deploymentWrapper1.Run(t, func(t *testing.T, deployment1 *api.ArangoDeployment) {
+		deploymentWrapper2.Run(t, func(t *testing.T, deployment2 *api.ArangoDeployment) {
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment1.GetName())
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment2.GetName())
 
-	// Create deployments
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl1)
-	require.NoError(t, err, fmt.Sprintf("Deployment creation failed: %v", err))
-	defer deferedCleanupDeployment(c, depl1.GetName(), ns)
+			ctx := arangod.WithRequireAuthentication(context.Background())
 
-	_, err = c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl2)
-	require.NoError(t, err, fmt.Sprintf("Deployment creation failed: %v", err))
-	defer deferedCleanupDeployment(c, depl2.GetName(), ns)
+			client1 := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment1, t, nil)
+			client2 := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment2, t, nil)
 
-	// Wait for deployments to be ready
-	deployment1, err := waitUntilDeployment(c, depl1.GetName(), ns, deploymentIsReady())
-	require.NoError(t, err, fmt.Sprintf("Deployment not running in time: %v", err))
+			helper.WaitUntilArangoClientReady(t, client1)
+			helper.WaitUntilArangoClientReady(t, client2)
 
-	deployment2, err := waitUntilDeployment(c, depl2.GetName(), ns, deploymentIsReady())
-	require.NoError(t, err, fmt.Sprintf("Deployment not running in time: %v", err))
+			// Test if we are able to create a collections in both deployments.
+			db1, err := client1.Database(ctx, "_system")
+			require.NoError(t, err, "failed to get database")
+			_, err = db1.CreateCollection(ctx, "col1", nil)
+			require.NoError(t, err, "failed to create collection")
 
-	require.True(t, deployment1 != nil && deployment2 != nil, "deployment is nil")
+			db2, err := client2.Database(ctx, "_system")
+			require.NoError(t, err, "failed to get database")
+			_, err = db2.CreateCollection(ctx, "col2", nil)
+			require.NoError(t, err, "failed to create collection")
 
-	// Create a database clients
-	ctx := context.Background()
-	DBClient1 := mustNewArangodDatabaseClient(ctx, kubecli, deployment1, t, nil)
-	require.NoError(t, waitUntilArangoDeploymentHealthy(deployment1, DBClient1, kubecli, ""), fmt.Sprintf("Deployment not healthy in time: %v", err))
-	DBClient2 := mustNewArangodDatabaseClient(ctx, kubecli, deployment2, t, nil)
-	require.NoError(t, waitUntilArangoDeploymentHealthy(deployment1, DBClient1, kubecli, ""), fmt.Sprintf("Deployment not healthy in time: %v", err))
+			// The newly created collections must be (only) visible in the deployment
+			// that it was created in. The following lines ensure this behavior.
+			collections1, err := db1.Collections(ctx)
+			require.NoError(t, err, "failed to get collections")
+			collections2, err := db2.Collections(ctx)
+			require.NoError(t, err, "failed to get collections")
 
-	// Test if we are able to create a collections in both deployments.
-	db1, err := DBClient1.Database(ctx, "_system")
-	require.NoError(t, err, "failed to get database")
-	_, err = db1.CreateCollection(ctx, "col1", nil)
-	require.NoError(t, err, "failed to create collection")
-
-	db2, err := DBClient2.Database(ctx, "_system")
-	require.NoError(t, err, "failed to get database")
-	_, err = db2.CreateCollection(ctx, "col2", nil)
-	require.NoError(t, err, "failed to create collection")
-
-	// The newly created collections must be (only) visible in the deployment
-	// that it was created in. The following lines ensure this behavior.
-	collections1, err := db1.Collections(ctx)
-	require.NoError(t, err, "failed to get collections")
-	collections2, err := db2.Collections(ctx)
-	require.NoError(t, err, "failed to get collections")
-
-	assert.True(t, containsCollection(collections1, "col1"), "collection missing")
-	assert.True(t, containsCollection(collections2, "col2"), "collection missing")
-	assert.False(t, containsCollection(collections1, "col2"), "collection must not be in this deployment")
-	assert.False(t, containsCollection(collections2, "col1"), "collection must not be in this deployment")
-
-	// Cleanup
-	removeDeployment(c, depl1.GetName(), ns)
-	removeDeployment(c, depl2.GetName(), ns)
-
+			assert.True(t, containsCollection(collections1, "col1"), "collection missing")
+			assert.True(t, containsCollection(collections2, "col2"), "collection missing")
+			assert.False(t, containsCollection(collections1, "col2"), "collection must not be in this deployment")
+			assert.False(t, containsCollection(collections2, "col1"), "collection must not be in this deployment")
+		})
+	})
 }
 
 func containsCollection(colls []driver.Collection, name string) bool {

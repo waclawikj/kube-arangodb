@@ -17,155 +17,54 @@
 //
 // Copyright holder is ArangoDB GmbH, Cologne, Germany
 //
-// Author Ewout Prangsma
+// Author Ewout Prangsma & Adam Janikowski
 //
 
 package tests
 
 import (
 	"context"
+	"fmt"
+	"github.com/arangodb/kube-arangodb/pkg/util/arangod"
+	"github.com/arangodb/kube-arangodb/tests/helper"
+	"github.com/stretchr/testify/require"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/dchest/uniuri"
-	"github.com/stretchr/testify/require"
-
-	driver "github.com/arangodb/go-driver"
+	"github.com/arangodb/go-driver"
 	api "github.com/arangodb/kube-arangodb/pkg/apis/deployment/v1alpha"
-	"github.com/arangodb/kube-arangodb/pkg/client"
 )
 
-// TestCursorSingle tests the creating of a single server deployment
-// with default settings and runs some cursor requests on it.
-func TestCursorSingle(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func Test_New_Cursor(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-cur-sng-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
-
-	// Create deployment
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	apiObject, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady())
-	if err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
-
-	// Check server role
-	require.NoError(t, testServerRole(ctx, client, driver.ServerRoleSingle))
-
-	// Run cursor tests
-	runCursorTests(t, client)
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
+	iterateOverModes(t, func(t *testing.T, mode api.DeploymentMode) {
+		cursorModeTest(t, mode, modeServerRole[mode])
+	})
 }
 
-// TestCursorActiveFailover tests the creating of a ActiveFailover server deployment
-// with default settings.
-func TestCursorActiveFailover(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func cursorModeTest(t *testing.T, mode api.DeploymentMode, role driver.ServerRole) {
+	helper.MarkSmokeTest(t, true)
+	deploymentWrapper := helper.NewArangoDeploymentWrapper(fmt.Sprintf("test-cur-%s", mode), func(deployment *api.ArangoDeployment) {
+		deployment.Spec.Mode = api.NewMode(mode)
+	})
 
-	// Prepare deployment config
-	depl := newDeployment("test-cur-rs-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeActiveFailover)
+	deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+		helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Create deployment
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
+		ctx := arangod.WithRequireAuthentication(context.Background())
+		client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
 
-	// Wait for deployment to be ready
-	apiObject, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady())
-	if err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
+		helper.WaitUntilArangoClientReady(t, client)
 
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
+		serverRole, err := client.ServerRole(ctx)
+		require.NoError(t, err)
 
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("ActiveFailover servers not running returning version in time: %v", err)
-	}
+		require.Equal(t, role, serverRole)
 
-	// Check server role
-	require.NoError(t, testServerRole(ctx, client, driver.ServerRoleSingleActive))
-
-	// Run cursor tests
-	runCursorTests(t, client)
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-}
-
-// TestCursorCluster tests the creating of a cluster deployment
-// with default settings.
-func TestCursorCluster(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-
-	// Prepare deployment config
-	depl := newDeployment("test-cur-cls-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-
-	// Create deployment
-	_, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	apiObject, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady())
-	if err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := context.Background()
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Cluster not running returning version in time: %v", err)
-	}
-
-	// Check server role
-	require.NoError(t, testServerRole(ctx, client, driver.ServerRoleCoordinator))
-
-	// Run cursor tests
-	runCursorTests(t, client)
-
-	// cleanup
-	removeDeployment(c, depl.GetName(), ns)
+		runCursorTests(t, client)
+	})
 }
 
 type Book struct {

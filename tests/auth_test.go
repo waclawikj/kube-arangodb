@@ -24,293 +24,113 @@ package tests
 
 import (
 	"context"
+	"github.com/arangodb/kube-arangodb/tests/helper"
+	"github.com/dchest/uniuri"
+	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/dchest/uniuri"
 
 	api "github.com/arangodb/kube-arangodb/pkg/apis/deployment/v1alpha"
-	"github.com/arangodb/kube-arangodb/pkg/client"
 	"github.com/arangodb/kube-arangodb/pkg/util"
 	"github.com/arangodb/kube-arangodb/pkg/util/arangod"
 	"github.com/arangodb/kube-arangodb/pkg/util/k8sutil"
 )
 
-// TestAuthenticationSingleDefaultSecret creating a single server
+func testAuthenticationRunForModes(t *testing.T, action func(t *testing.T, mode api.DeploymentMode)) {
+	iterateOverModes(t, func(t *testing.T, mode api.DeploymentMode) {
+		if mode == api.DeploymentModeActiveFailover {
+			t.Skipf("Test is not valid for mode %s", mode)
+		}
+
+		action(t, mode)
+	})
+}
+
+// TestAuthenticationDefaultSecret creating a server
 // with default authentication (on) using a generated JWT secret.
-func TestAuthenticationSingleDefaultSecret(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func Test_New_AuthenticationDefaultSecret(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-auth-sng-def-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
-	depl.Spec.SetDefaults(depl.GetName())
+	testAuthenticationRunForModes(t, func(t *testing.T, mode api.DeploymentMode) {
+		helper.MarkSmokeTest(t, true)
 
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
+		deploymentWrapper := helper.NewArangoDeploymentWrapper("test-auth-def", func(deployment *api.ArangoDeployment) {
+			deployment.Spec.Mode = api.NewMode(mode)
+		})
 
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
+		deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Secret must now exist
-	if _, err := waitUntilSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, nil, time.Second); err != nil {
-		t.Fatalf("JWT secret '%s' not found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
+			helper.WaitUntilKubernetesSecretIsPresent(t, deployment.Spec.Authentication.GetJWTSecretName())
 
-	// Create a database client
-	ctx := arangod.WithRequireAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
+			ctx := arangod.WithRequireAuthentication(context.Background())
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
 
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
+			helper.WaitUntilArangoClientReady(t, client)
 
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
+			helper.CleanArangoDeployment(t, deployment.GetName())
 
-	// Secret must no longer exist
-	if err := waitUntilSecretNotFound(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, time.Minute); err != nil {
-		t.Fatalf("JWT secret '%s' still found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
+			helper.WaitUntilKubernetesSecretIsMissing(t, deployment.Spec.Authentication.GetJWTSecretName())
+		})
+	})
 }
 
-// TestAuthenticationSingleCustomSecret creating a single server
+// TestAuthenticationCustomSecret creating a server
 // with default authentication (on) using a user created JWT secret.
-func TestAuthenticationSingleCustomSecret(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-	secrets := kubecli.CoreV1().Secrets(ns)
+func Test_New_AuthenticationCustomSecret(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-auth-sng-cst-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
-	depl.Spec.Authentication.JWTSecretName = util.NewString(strings.ToLower(uniuri.New()))
-	depl.Spec.SetDefaults(depl.GetName())
+	testAuthenticationRunForModes(t, func(t *testing.T, mode api.DeploymentMode) {
+		helper.MarkSmokeTest(t, true)
 
-	// Create secret
-	if err := k8sutil.CreateTokenSecret(secrets, depl.Spec.Authentication.GetJWTSecretName(), "foo", nil); err != nil {
-		t.Fatalf("Create JWT secret failed: %v", err)
-	}
-	defer removeSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns)
+		secretName := strings.ToLower(uniuri.New())
+		defer helper.CleanKubernetesSecret(t, secretName)
+		err := k8sutil.CreateTokenSecret(helper.KubernetesSecretClient(t), secretName, "foo", nil)
+		require.NoError(t, err)
 
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
+		deploymentWrapper := helper.NewArangoDeploymentWrapper("test-auth-cst", func(deployment *api.ArangoDeployment) {
+			deployment.Spec.Mode = api.NewMode(mode)
+			deployment.Spec.Authentication.JWTSecretName = &secretName
+		})
 
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
+		helper.WaitUntilKubernetesSecretIsPresent(t, secretName)
 
-	// Create a database client
-	ctx := arangod.WithRequireAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
+		deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
+			ctx := arangod.WithRequireAuthentication(context.Background())
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
 
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
+			helper.WaitUntilArangoClientReady(t, client)
 
-	// Secret must still exist
-	if _, err := waitUntilSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, nil, time.Second); err != nil {
-		t.Fatalf("JWT secret '%s' not found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
+			helper.CleanArangoDeployment(t, deployment.GetName())
+		})
+
+		// Secret must still exists
+		helper.WaitUntilKubernetesSecretIsPresent(t, secretName)
+	})
 }
 
-// TestAuthenticationNoneSingle creating a single server
+// TestAuthenticationNone creating a server
 // with authentication set to `None`.
-func TestAuthenticationNoneSingle(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
+func Test_New_AuthenticationNone(t *testing.T) {
+	helper.MarkSmokeTest(t, true)
 
-	// Prepare deployment config
-	depl := newDeployment("test-auth-none-sng-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeSingle)
-	depl.Spec.Authentication.JWTSecretName = util.NewString(api.JWTSecretNameDisabled)
-	depl.Spec.SetDefaults(depl.GetName())
+	testAuthenticationRunForModes(t, func(t *testing.T, mode api.DeploymentMode) {
+		helper.MarkSmokeTest(t, true)
 
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
+		deploymentWrapper := helper.NewArangoDeploymentWrapper("test-auth-def", func(deployment *api.ArangoDeployment) {
+			deployment.Spec.Mode = api.NewMode(mode)
+			deployment.Spec.Authentication.JWTSecretName = util.NewString(api.JWTSecretNameDisabled)
+		})
 
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
+		deploymentWrapper.Run(t, func(t *testing.T, deployment *api.ArangoDeployment) {
+			helper.WaitUntilArangoDeploymentIsReady(t, deployment.GetName())
 
-	// Create a database client
-	ctx := arangod.WithSkipAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
+			ctx := arangod.WithSkipAuthentication(context.Background())
+			client := mustNewArangodDatabaseClient(ctx, helper.KubernetesClient(t), deployment, t, nil)
 
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-}
-
-// TestAuthenticationClusterDefaultSecret creating a cluster
-// with default authentication (on) using a generated JWT secret.
-func TestAuthenticationClusterDefaultSecret(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-
-	// Prepare deployment config
-	depl := newDeployment("test-auth-cls-def-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.SetDefaults(depl.GetName())
-
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Secret must now exist
-	if _, err := waitUntilSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, nil, time.Second); err != nil {
-		t.Fatalf("JWT secret '%s' not found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
-
-	// Create a database client
-	ctx := arangod.WithRequireAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-
-	// Secret must no longer exist
-	if err := waitUntilSecretNotFound(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, time.Minute); err != nil {
-		t.Fatalf("JWT secret '%s' still found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
-}
-
-// TestAuthenticationClusterCustomSecret creating a cluster
-// with default authentication (on) using a user created JWT secret.
-func TestAuthenticationClusterCustomSecret(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-	secrets := kubecli.CoreV1().Secrets(ns)
-
-	// Prepare deployment config
-	depl := newDeployment("test-auth-cls-cst-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.Authentication.JWTSecretName = util.NewString(strings.ToLower(uniuri.New()))
-	depl.Spec.SetDefaults(depl.GetName())
-
-	// Create secret
-	if err := k8sutil.CreateTokenSecret(secrets, depl.Spec.Authentication.GetJWTSecretName(), "foo", nil); err != nil {
-		t.Fatalf("Create JWT secret failed: %v", err)
-	}
-
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := arangod.WithRequireAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
-
-	// Secret must still exist
-	if _, err := waitUntilSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns, nil, time.Second); err != nil {
-		t.Fatalf("JWT secret '%s' not found: %v", depl.Spec.Authentication.GetJWTSecretName(), err)
-	}
-
-	// Cleanup secret
-	removeSecret(kubecli, depl.Spec.Authentication.GetJWTSecretName(), ns)
-}
-
-// TestAuthenticationNoneCluster creating a cluster
-// with authentication set to `None`.
-func TestAuthenticationNoneCluster(t *testing.T) {
-	longOrSkip(t)
-	c := client.MustNewInCluster()
-	kubecli := mustNewKubeClient(t)
-	ns := getNamespace(t)
-
-	// Prepare deployment config
-	depl := newDeployment("test-auth-none-cls-" + uniuri.NewLen(4))
-	depl.Spec.Mode = api.NewMode(api.DeploymentModeCluster)
-	depl.Spec.Authentication.JWTSecretName = util.NewString(api.JWTSecretNameDisabled)
-	depl.Spec.SetDefaults(depl.GetName())
-
-	// Create deployment
-	apiObject, err := c.DatabaseV1alpha().ArangoDeployments(ns).Create(depl)
-	if err != nil {
-		t.Fatalf("Create deployment failed: %v", err)
-	}
-	defer deferedCleanupDeployment(c, depl.GetName(), ns)
-
-	// Wait for deployment to be ready
-	if _, err := waitUntilDeployment(c, depl.GetName(), ns, deploymentIsReady()); err != nil {
-		t.Fatalf("Deployment not running in time: %v", err)
-	}
-
-	// Create a database client
-	ctx := arangod.WithSkipAuthentication(context.Background())
-	client := mustNewArangodDatabaseClient(ctx, kubecli, apiObject, t, nil)
-
-	// Wait for single server available
-	if err := waitUntilVersionUp(client, nil); err != nil {
-		t.Fatalf("Single server not running returning version in time: %v", err)
-	}
-
-	// Cleanup
-	removeDeployment(c, depl.GetName(), ns)
+			helper.WaitUntilArangoClientReady(t, client)
+		})
+	})
 }
