@@ -292,6 +292,18 @@ func newDeployment(name string) *api.ArangoDeployment {
 	return depl
 }
 
+func newDeploymentWithValidation(name string, adjustDeployment func(*api.ArangoDeployment)) (*api.ArangoDeployment, error) {
+	deployment := newDeployment(name)
+	adjustDeployment(deployment)
+
+	deployment.Spec.SetDefaults(deployment.GetName())
+	if err := deployment.Spec.Validate(); err != nil {
+		return nil, err
+	}
+
+	return deployment, nil
+}
+
 // waitUntilDeployment waits until a deployment with given name in given namespace
 // reached a state where the given predicate returns true.
 func waitUntilDeployment(cli versioned.Interface, deploymentName, ns string, predicate func(*api.ArangoDeployment) error, timeout ...time.Duration) (*api.ArangoDeployment, error) {
@@ -666,7 +678,7 @@ func removeDeployment(cli versioned.Interface, deploymentName, ns string) error 
 	return nil
 }
 
-// removeReplication removes a deployment
+// removeReplication removes a replication
 func removeReplication(cli versioned.Interface, replicationName, ns string) error {
 	if err := cli.ReplicationV1alpha().ArangoDeploymentReplications(ns).Delete(replicationName, nil); err != nil && k8sutil.IsNotFound(err) {
 		return maskAny(err)
