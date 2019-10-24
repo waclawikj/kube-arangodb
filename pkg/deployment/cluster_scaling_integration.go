@@ -49,6 +49,10 @@ type clusterScalingIntegration struct {
 		arangod.NumberOfServers
 		mutex sync.Mutex
 	}
+	scaleEnabled struct {
+		mutex   sync.Mutex
+		enabled bool
+	}
 }
 
 const (
@@ -57,10 +61,12 @@ const (
 
 // newClusterScalingIntegration creates a new clusterScalingIntegration.
 func newClusterScalingIntegration(depl *Deployment) *clusterScalingIntegration {
-	return &clusterScalingIntegration{
+	ci := &clusterScalingIntegration{
 		log:  depl.deps.Log,
 		depl: depl,
 	}
+	ci.scaleEnabled.enabled = true
+	return ci
 }
 
 // SendUpdateToCluster records the given spec to be sended to the cluster.
@@ -78,7 +84,7 @@ func (ci *clusterScalingIntegration) ListenForClusterEvents(stopCh <-chan struct
 		delay := time.Second * 2
 
 		// Is deployment in running state
-		if ci.depl.GetPhase() == api.DeploymentPhaseRunning {
+		if ci.depl.GetPhase() == api.DeploymentPhaseRunning && ci.IsScalingEnabled() {
 			// Update cluster with our state
 			ctx := context.Background()
 			expectSuccess := goodInspections > 0 || time.Since(start) > maxClusterBootstrapTime
@@ -200,11 +206,6 @@ func (ci *clusterScalingIntegration) updateClusterServerCount(ctx context.Contex
 	}
 
 	log := ci.log
-	c, err := ci.depl.clientCache.GetDatabase(ctx)
-	if err != nil {
-		return false, maskAny(err)
-	}
-
 	var coordinatorCountPtr *int
 	var dbserverCountPtr *int
 
@@ -223,13 +224,11 @@ func (ci *clusterScalingIntegration) updateClusterServerCount(ctx context.Contex
 		dbserverCountPtr = &dbserverCount
 	}
 
-	ci.lastNumberOfServers.mutex.Lock()
-	lastNumberOfServers := ci.lastNumberOfServers.NumberOfServers
-	ci.lastNumberOfServers.mutex.Unlock()
+	lastNumberOfServers := ci.GetLastNumberOfServers()
 
 	// This is to prevent unneseccary updates that may override some values written by the WebUI (in the case of a update loop)
 	if coordinatorCount != lastNumberOfServers.GetCoordinators() || dbserverCount != lastNumberOfServers.GetDBServers() {
-		if err := arangod.SetNumberOfServers(ctx, c.Connection(), coordinatorCountPtr, dbserverCountPtr); err != nil {
+		if err := ci.depl.SetNumberOfServers(ctx, coordinatorCountPtr, dbserverCountPtr); err != nil {
 			if expectSuccess {
 				log.Debug().Err(err).Msg("Failed to set number of servers")
 			}
@@ -252,4 +251,71 @@ func (ci *clusterScalingIntegration) updateClusterServerCount(ctx context.Contex
 	ci.lastNumberOfServers.Coordinators = &coordinatorCount
 	ci.lastNumberOfServers.DBServers = &dbserverCount
 	return safeToAskCluster, nil
+}
+
+// GetLastNumberOfServers returns the last number of servers
+func (ci *clusterScalingIntegration) GetLastNumberOfServers() arangod.NumberOfServers {
+	ci.lastNumberOfServers.mutex.Lock()
+	defer ci.lastNumberOfServers.mutex.Unlock()
+
+	return ci.lastNumberOfServers.NumberOfServers
+}
+
+// DisableScalingCluster disables scaling DBservers and coordinators
+func (ci *clusterScalingIntegration) DisableScalingCluster() error {
+	ci.scaleEnabled.mutex.Lock()
+	defer ci.scaleEnabled.mutex.Unlock()
+
+	// Turn off scaling DBservers and coordinators in arangoDB for the UI
+	ctx := context.Background()
+	if err := ci.depl.SetNumberOfServers(ctx, nil, nil); err != nil {
+		return maskAny(err)
+	}
+
+	ci.scaleEnabled.enabled = false
+	return nil
+}
+
+// EnableScalingCluster enables scaling DBservers and coordinators
+func (ci *clusterScalingIntegration) EnableScalingCluster() error {
+	ci.scaleEnabled.mutex.Lock()
+	defer ci.scaleEnabled.mutex.Unlock()
+
+	if ci.scaleEnabled.enabled {
+		return nil
+	}
+
+	ctx := context.Background()
+	lastNumberOfServers := ci.GetLastNumberOfServers()
+	err := ci.depl.SetNumberOfServers(ctx, lastNumberOfServers.Coordinators, lastNumberOfServers.DBServers)
+	if err != nil {
+		return maskAny(err)
+	}
+	ci.scaleEnabled.enabled = true
+	return nil
+}
+
+// IsScalingEnabled checks if scaling is allowed.
+func (ci *clusterScalingIntegration) IsScalingEnabled() bool {
+	ci.scaleEnabled.mutex.Lock()
+
+	if ci.scaleEnabled.enabled {
+		ci.scaleEnabled.mutex.Unlock()
+		return true
+	}
+
+	// Scaling is disabled
+	status, _ := ci.depl.GetStatus()
+	if !status.Plan.Empty() {
+		// Some Plan exists and scaling can not be enabled
+		ci.scaleEnabled.mutex.Unlock()
+		return false
+	}
+
+	// Scaling should be enabled because there is no Plan. It can happen when the action with enabling
+	ci.scaleEnabled.mutex.Unlock()
+	if ci.EnableScalingCluster() != nil {
+		return false
+	}
+	return true
 }

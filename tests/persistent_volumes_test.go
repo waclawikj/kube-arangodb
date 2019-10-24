@@ -292,10 +292,10 @@ func TestPVCChangeStorage(t *testing.T) {
 
 	name := strings.Replace(fmt.Sprintf("tcs-%s-%s", mode[:2], randomString), ".", "", -1)
 	depl, err := newDeploymentWithValidation(name, func(deployment *api.ArangoDeployment) {
-		var agentsCount, coordinatorCount, DBServersCount = 1, 1, 2
+		var agentsCount, coordinatorCount, DBServersCount = 3, 2, 3
 
 		deployment.Spec.Mode = api.NewMode(mode)
-		deployment.Spec.Environment = api.NewEnvironment(api.EnvironmentDevelopment)
+		deployment.Spec.Environment = api.NewEnvironment(api.EnvironmentProduction)
 
 		volumeMode := corev1.PersistentVolumeFilesystem
 		deployment.Spec.DBServers.VolumeClaimTemplate = &corev1.PersistentVolumeClaim{
@@ -393,10 +393,10 @@ func TestPVCChangeStorageDeprecated(t *testing.T) {
 
 	name := strings.Replace(fmt.Sprintf("tcs-%s-%s", mode[:2], randomString), ".", "", -1)
 	depl, err := newDeploymentWithValidation(name, func(deployment *api.ArangoDeployment) {
-		var agentsCount, coordinatorCount, DBServersCount = 1, 1, 2
+		var agentsCount, coordinatorCount, DBServersCount = 3, 2, 3
 
 		deployment.Spec.Mode = api.NewMode(mode)
-		deployment.Spec.Environment = api.NewEnvironment(api.EnvironmentDevelopment)
+		deployment.Spec.Environment = api.NewEnvironment(api.EnvironmentProduction)
 
 		deployment.Spec.DBServers.Resources.Requests = map[corev1.ResourceName]resource.Quantity{
 			corev1.ResourceStorage: resource.MustParse("2Gi"),
