@@ -90,7 +90,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 	currentPlan api.Plan, spec api.DeploymentSpec,
 	status api.DeploymentStatus, pods []v1.Pod,
 	context PlanBuilderContext) (api.Plan, bool) {
-	if len(currentPlan) > 0 {
+	if !currentPlan.Empty() {
 		// Plan already exists, complete that first
 		return currentPlan, false
 	}
@@ -101,7 +101,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 	// Check for members in failed state
 	status.Members.ForeachServerGroup(func(group api.ServerGroup, members api.MemberStatusList) error {
 		for _, m := range members {
-			if m.Phase == api.MemberPhaseFailed && len(plan) == 0 {
+			if m.Phase == api.MemberPhaseFailed && plan.Empty() {
 				log.Debug().
 					Str("id", m.ID).
 					Str("role", group.AsRole()).
@@ -121,7 +121,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 
 	// Check for cleaned out dbserver in created state
 	for _, m := range status.Members.DBServers {
-		if len(plan) == 0 && m.Phase.IsCreatedOrDrain() && m.Conditions.IsTrue(api.ConditionTypeCleanedOut) {
+		if plan.Empty() && m.Phase.IsCreatedOrDrain() && m.Conditions.IsTrue(api.ConditionTypeCleanedOut) {
 			log.Debug().
 				Str("id", m.ID).
 				Str("role", api.ServerGroupDBServers.AsRole()).
@@ -134,7 +134,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 	}
 
 	// Check for scale up/down
-	if len(plan) == 0 {
+	if plan.Empty() {
 		switch spec.GetMode() {
 		case api.DeploymentModeSingle:
 			// Never scale down
@@ -154,7 +154,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 	}
 
 	// Check for the need to rotate one or more members
-	if len(plan) == 0 {
+	if plan.Empty() {
 		getPod := func(podName string) *v1.Pod {
 			for _, p := range pods {
 				if p.GetName() == podName {
@@ -214,7 +214,7 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 		if newPlan, upgradeNotAllowed, fromVersion, toVersion, fromLicense, toLicense := createRotateOrUpgradePlan(); upgradeNotAllowed {
 			// Upgrade is needed, but not allowed
 			context.CreateEvent(k8sutil.NewUpgradeNotAllowedEvent(apiObject, fromVersion, toVersion, fromLicense, toLicense))
-		} else if len(newPlan) > 0 {
+		} else if !newPlan.Empty() {
 			if clusterReadyForUpgrade(context) {
 				// Use the new plan
 				plan = newPlan
@@ -225,17 +225,17 @@ func createPlan(log zerolog.Logger, apiObject k8sutil.APIObject,
 	}
 
 	// Check for the need to rotate TLS certificate of a members
-	if len(plan) == 0 {
+	if plan.Empty() {
 		plan = createRotateTLSServerCertificatePlan(log, spec, status, context.GetTLSKeyfile)
 	}
 
 	// Check for changes storage classes or requirements
-	if len(plan) == 0 {
+	if plan.Empty() {
 		plan = createRotateServerStoragePlan(log, apiObject, spec, status, context.GetPvc, context.CreateEvent)
 	}
 
 	// Check for the need to rotate TLS CA certificate and all members
-	if len(plan) == 0 {
+	if plan.Empty() {
 		plan = createRotateTLSCAPlan(log, apiObject, spec, status, context.GetTLSCA, context.CreateEvent)
 	}
 

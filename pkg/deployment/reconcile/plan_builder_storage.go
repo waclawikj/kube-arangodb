@@ -43,7 +43,7 @@ func createRotateServerStoragePlan(log zerolog.Logger, apiObject k8sutil.APIObje
 	var plan api.Plan
 	status.Members.ForeachServerGroup(func(group api.ServerGroup, members api.MemberStatusList) error {
 		for _, m := range members {
-			if len(plan) > 0 {
+			if !plan.Empty() {
 				// Only 1 change at a time
 				continue
 			}
@@ -75,7 +75,6 @@ func createRotateServerStoragePlan(log zerolog.Logger, apiObject k8sutil.APIObje
 
 				if group == api.ServerGroupDBServers {
 					plan = append(plan,
-						// Scale up, so we're sure that a new member is available
 						api.NewAction(api.ActionTypeDisableClusterScaling, group, ""),
 						api.NewAction(api.ActionTypeAddMember, group, ""),
 						api.NewAction(api.ActionTypeWaitForMemberUp, group, api.MemberIDPreviousAction),

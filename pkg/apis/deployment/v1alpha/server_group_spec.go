@@ -140,8 +140,8 @@ func (s ServerGroupSpec) GetArgs() []string {
 
 // GetStorageClassName returns the value of storageClassName.
 func (s ServerGroupSpec) GetStorageClassName() string {
-	if claim := s.GetVolumeClaimTemplate(); claim != nil {
-		return util.StringOrDefault(claim.Spec.StorageClassName)
+	if pvc := s.GetVolumeClaimTemplate(); pvc != nil {
+		return util.StringOrDefault(pvc.Spec.StorageClassName)
 	}
 	return util.StringOrDefault(s.StorageClassName)
 }
