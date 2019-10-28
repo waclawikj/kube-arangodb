@@ -139,7 +139,7 @@ func (p Plan) Equal(other Plan) bool {
 	return true
 }
 
-// Empty checks if plan is empty
-func (p Plan) Empty() bool {
+// IsEmpty checks if plan is empty
+func (p Plan) IsEmpty() bool {
 	return len(p) == 0
 }

@@ -42,7 +42,7 @@ func createRotateTLSServerCertificatePlan(log zerolog.Logger, spec api.Deploymen
 	var plan api.Plan
 	status.Members.ForeachServerGroup(func(group api.ServerGroup, members api.MemberStatusList) error {
 		for _, m := range members {
-			if !plan.Empty() {
+			if !plan.IsEmpty() {
 				// Only 1 change at a time
 				continue
 			}
